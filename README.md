@@ -321,13 +321,3 @@ linear-cli/
 - Bulk operations
 - Markdown export
 
-## Performance
-
-- Zero external dependencies (pure Go stdlib)
-- 30-second HTTP timeout
-- Complexity limit: 10000 (Linear's max)
-- Result limit: 100 items per query
-
-## License
-
-[Add your license here]
