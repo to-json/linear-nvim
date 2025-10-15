@@ -2,6 +2,8 @@
 
 Command-line interface for Linear's project management API. Built in Go with zero dependencies, provides fast access to issues, projects, and templates.
 
+This project was basically fully vibe-coded. I've read some of the code, i guess. but mostly i just talked claude into it.
+
 ## Building
 
 ### Prerequisites
