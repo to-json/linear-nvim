@@ -109,11 +109,12 @@ All commands support `--json` flag for machine-readable output.
 
 ## Editor Plugins
 
-Two plugin versions are available:
+Three plugin versions are available:
 - **`linear.lua`** - Full-featured Neovim plugin with async operations
 - **`linear.vim`** - Vim9script port with blocking operations (works in Vim 9+)
+- **`linear.el`** - Emacs Lisp plugin with synchronous operations (works in Emacs 27.1+)
 
-Both provide the same commands and features. Choose based on your editor.
+All three provide the same commands and features. Choose based on your editor.
 
 ### Neovim Installation (linear.lua)
 
@@ -211,6 +212,75 @@ Plug '~/hc/linear-cli'
 
 **Note**: The Vim version uses blocking operations (commands pause Vim while running). All features work identically to the Neovim version.
 
+### Emacs Installation (linear.el)
+
+Add to your `~/.emacs.d/init.el`:
+
+```elisp
+;; Add the linear-cli directory to load path
+(add-to-list 'load-path "~/hc/linear-cli")
+(require 'linear)
+
+;; Optional: Set up keybindings
+(global-set-key (kbd "C-c l c") 'linear-create-issue)
+(global-set-key (kbd "C-c l v") 'linear-view-issue)
+(global-set-key (kbd "C-c l l") 'linear-list-project-issues)
+(global-set-key (kbd "C-c l t") 'linear-take-issue)
+(global-set-key (kbd "C-c l m") 'linear-add-minicomment)
+(global-set-key (kbd "C-c l C") 'linear-add-comment)
+(global-set-key (kbd "C-c l s") 'linear-change-state)
+(global-set-key (kbd "C-c l a") 'linear-assign-issue)
+(global-set-key (kbd "C-c l u") 'linear-unassign-issue)
+(global-set-key (kbd "C-c l e") 'linear-export-issue)
+
+;; Optional: Customize export directory
+(setq linear-export-dir (expand-file-name "~/.linear/past-tickets"))
+```
+
+Or with `use-package`:
+
+```elisp
+(use-package linear
+  :load-path "~/hc/linear-cli"
+  :bind (("C-c l c" . linear-create-issue)
+         ("C-c l v" . linear-view-issue)
+         ("C-c l l" . linear-list-project-issues)
+         ("C-c l t" . linear-take-issue)
+         ("C-c l m" . linear-add-minicomment)
+         ("C-c l C" . linear-add-comment)
+         ("C-c l s" . linear-change-state)
+         ("C-c l a" . linear-assign-issue)
+         ("C-c l u" . linear-unassign-issue)
+         ("C-c l e" . linear-export-issue))
+  :custom
+  (linear-export-dir "~/.linear/past-tickets"))
+```
+
+#### Emacs Commands
+
+- `M-x linear-create-issue` - Interactive issue creation with template support
+- `M-x linear-list-project-issues` - Browse issues by project, press `RET` to view
+- `M-x linear-view-issue` - View issue with full details (editable)
+- `M-x linear-add-comment` - Add comment with buffer editor (markdown support)
+- `M-x linear-add-minicomment` - Add comment with quick minibuffer input
+- `M-x linear-change-state` - Change issue workflow state
+- `M-x linear-assign-issue` - Assign issue to team member
+- `M-x linear-unassign-issue` - Remove assignee
+- `M-x linear-take-issue` - Self-assign issue to yourself
+- `M-x linear-export-issue` - Export issue to markdown file
+
+**Context-aware**: All commands work without arguments - they detect issue from current buffer (viewing issue or issue list at cursor)
+
+#### Editing Issues in Emacs
+
+When viewing an issue with `M-x linear-view-issue`:
+
+1. Edit the description (marked with `<!-- DESCRIPTION START/END -->`)
+2. Edit your own comments (marked with `<!-- COMMENT ID: ... -->`)
+3. Save with `C-x C-s` - automatically syncs to Linear
+
+**Note**: The Emacs version uses synchronous operations (commands block Emacs while running). Optional: Install `markdown-mode` for better syntax highlighting (falls back to `text-mode` if not available).
+
 ### Plugin Requirements
 
 **Neovim version (`linear.lua`)**:
@@ -223,7 +293,13 @@ Plug '~/hc/linear-cli'
 - `linear-cli` binary in `$GOPATH/bin` or local path
 - LINEAR_API_KEY environment variable
 
-Both plugins automatically find the CLI in your GOPATH or fall back to the local build.
+**Emacs version (`linear.el`)**:
+- Emacs 27.1+
+- `linear-cli` binary in `$GOPATH/bin` or local path
+- LINEAR_API_KEY environment variable
+- Optional: `markdown-mode` package for syntax highlighting
+
+All plugins automatically find the CLI in your GOPATH or fall back to the local build.
 
 ## Making Changes
 
@@ -350,6 +426,7 @@ linear-cli/
 ├── comment_additions.go    # Comment-related operations
 ├── linear.lua              # Neovim plugin (async)
 ├── linear.vim              # Vim9 plugin (blocking)
+├── linear.el               # Emacs plugin (synchronous)
 ├── go.mod                  # Go module definition
 ├── claude-docs/            # API reference & docs
 └── tests/                  # Test files
@@ -373,7 +450,7 @@ linear-cli/
 - Comment management
 - Team & member queries
 - JSON output for scripting
-- Editor integration (Neovim + Vim9) with editing support
+- Editor integration (Neovim + Vim9 + Emacs) with editing support
 - Parent/child issue relationships
 - Issue export to markdown
 
