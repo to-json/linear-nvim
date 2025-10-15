@@ -59,6 +59,48 @@ local function run_cli(args, callback)
   })
 end
 
+-- Resolves issue_id from multiple sources and invokes callback with resolved ID.
+-- Detection order:
+--   1. Explicit issue_id argument (if non-empty string)
+--   2. Buffer variable 'linear_issue_id' (when viewing an issue buffer)
+--   3. Buffer variable 'linear_issue_map' + cursor position (when in issue list buffer)
+--   4. Prompt user via vim.ui.input (fallback)
+-- Callback signature: callback(resolved_issue_id)
+local function resolve_issue_id(issue_id, callback)
+  -- Check explicit argument
+  if issue_id and issue_id ~= "" then
+    callback(issue_id)
+    return
+  end
+
+  -- Try to get from current buffer's linear_issue_id
+  local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, 0, 'linear_issue_id')
+  if ok and buf_issue_id and buf_issue_id ~= "" then
+    callback(buf_issue_id)
+    return
+  end
+
+  -- Try to get from issue list buffer's linear_issue_map
+  local map_ok, issue_map = pcall(vim.api.nvim_buf_get_var, 0, 'linear_issue_map')
+  if map_ok and issue_map then
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local line_num = cursor[1]
+    if issue_map[line_num] and issue_map[line_num] ~= "" then
+      callback(issue_map[line_num])
+      return
+    end
+  end
+
+  -- Fallback: prompt user for issue ID
+  vim.ui.input({
+    prompt = 'Enter issue ID (e.g., ENG-123): ',
+  }, function(input)
+    if input and input ~= "" then
+      callback(input)
+    end
+  end)
+end
+
 local function fetch_teams(callback)
   run_cli('teams --json', callback)
 end
@@ -476,55 +518,41 @@ end
 -- Adds a comment to an issue. Tries to get issue_id from argument, buffer variable, or prompts.
 -- Auto-refreshes issue buffer if currently viewing the issue.
 function M.add_comment(issue_id)
-  if not issue_id or issue_id == "" then
-    local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, 0, 'linear_issue_id')
-    if ok and buf_issue_id and buf_issue_id ~= "" then
-      issue_id = buf_issue_id
-    else
-      vim.ui.input({
-        prompt = 'Enter issue ID (e.g., ENG-123): ',
-      }, function(input)
-        if input and input ~= "" then
-          M.add_comment(input)
-        end
-      end)
-      return
-    end
-  end
-
-  vim.ui.input({
-    prompt = 'Comment text: ',
-    default = '',
-  }, function(comment_text)
-    if not comment_text or comment_text == "" then
-      vim.notify("Comment text is required", vim.log.levels.WARN)
-      return
-    end
-
-    vim.notify("Adding comment to " .. issue_id .. "...", vim.log.levels.INFO)
-
-    local cmd = string.format(
-      'comment %s %s --json',
-      vim.fn.shellescape(issue_id),
-      vim.fn.shellescape(comment_text)
-    )
-
-    run_cli(cmd, function(result, err)
-      if err then
-        vim.notify("Error adding comment: " .. err, vim.log.levels.ERROR)
+  resolve_issue_id(issue_id, function(resolved_id)
+    vim.ui.input({
+      prompt = 'Comment text: ',
+      default = '',
+    }, function(comment_text)
+      if not comment_text or comment_text == "" then
+        vim.notify("Comment text is required", vim.log.levels.WARN)
         return
       end
 
-      local comment_id = result and result.id or "unknown"
-      vim.notify("Comment added successfully (ID: " .. comment_id .. ")", vim.log.levels.INFO)
+      vim.notify("Adding comment to " .. resolved_id .. "...", vim.log.levels.INFO)
 
-      local current_buf = vim.api.nvim_get_current_buf()
-      local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, current_buf, 'linear_issue_id')
-      if ok and buf_issue_id == issue_id then
-        vim.schedule(function()
-          M.view_issue(issue_id)
-        end)
-      end
+      local cmd = string.format(
+        'comment %s %s --json',
+        vim.fn.shellescape(resolved_id),
+        vim.fn.shellescape(comment_text)
+      )
+
+      run_cli(cmd, function(result, err)
+        if err then
+          vim.notify("Error adding comment: " .. err, vim.log.levels.ERROR)
+          return
+        end
+
+        local comment_id = result and result.id or "unknown"
+        vim.notify("Comment added successfully (ID: " .. comment_id .. ")", vim.log.levels.INFO)
+
+        local current_buf = vim.api.nvim_get_current_buf()
+        local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, current_buf, 'linear_issue_id')
+        if ok and buf_issue_id == resolved_id then
+          vim.schedule(function()
+            M.view_issue(resolved_id)
+          end)
+        end
+      end)
     end)
   end)
 end
@@ -689,292 +717,269 @@ end
 -- Edit markers (<!-- ... -->) indicate editable sections. Save with :w to post changes.
 -- Reuses existing buffer if one with this issue_id already exists.
 function M.view_issue(issue_id)
-  if not issue_id or issue_id == "" then
-    vim.ui.input({
-      prompt = 'Enter issue ID (e.g., ENG-123): ',
-    }, function(input)
-      if input and input ~= "" then
-        M.view_issue(input)
+  resolve_issue_id(issue_id, function(resolved_id)
+    vim.notify("Fetching issue " .. resolved_id .. "...", vim.log.levels.INFO)
+
+    run_cli('get issue ' .. vim.fn.shellescape(resolved_id) .. ' --json', function(issue, err)
+      if err then
+        vim.notify("Error fetching issue: " .. err, vim.log.levels.ERROR)
+        return
       end
-    end)
-    return
-  end
 
-  vim.notify("Fetching issue " .. issue_id .. "...", vim.log.levels.INFO)
-
-  run_cli('get issue ' .. vim.fn.shellescape(issue_id) .. ' --json', function(issue, err)
-    if err then
-      vim.notify("Error fetching issue: " .. err, vim.log.levels.ERROR)
-      return
-    end
-
-    if not issue then
-      vim.notify("No issue data returned", vim.log.levels.ERROR)
-      return
-    end
-
-    local current_user_name = nil
-    if issue.assignee and type(issue.assignee) == "table" and issue.assignee.name then
-      current_user_name = issue.assignee.name
-    elseif issue.creator and type(issue.creator) == "table" and issue.creator.name then
-      current_user_name = issue.creator.name
-    end
-
-    local buffer_name = 'linear://' .. issue_id
-    local existing_bufnr = nil
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_valid(buf) then
-        local name = vim.api.nvim_buf_get_name(buf)
-        if name == buffer_name then
-          existing_bufnr = buf
-          break
-        end
+      if not issue then
+        vim.notify("No issue data returned", vim.log.levels.ERROR)
+        return
       end
-    end
 
-    local bufnr
-    if existing_bufnr then
-      bufnr = existing_bufnr
-      vim.api.nvim_buf_set_option(bufnr, 'modifiable', true)
-    else
-      bufnr = vim.api.nvim_create_buf(false, true)
-      vim.api.nvim_buf_set_name(bufnr, buffer_name)
-    end
-
-    vim.api.nvim_buf_set_option(bufnr, 'buftype', 'acwrite')
-    vim.api.nvim_buf_set_option(bufnr, 'filetype', 'markdown')
-
-    vim.api.nvim_buf_set_var(bufnr, 'linear_issue_id', issue_id)
-    vim.api.nvim_buf_set_var(bufnr, 'linear_issue_data', issue)
-
-    local lines = {}
-
-    local identifier = issue.identifier or issue_id
-    local title = issue.title or "(no title)"
-    table.insert(lines, "# " .. identifier .. ": " .. title)
-    table.insert(lines, "")
-
-    if issue.url then
-      table.insert(lines, "**URL:** " .. issue.url)
-      table.insert(lines, "")
-    end
-
-    local team_name = "Unknown"
-    if issue.team and type(issue.team) == "table" then
-      team_name = issue.team.name or "Unknown"
-    elseif type(issue.team) == "string" then
-      team_name = issue.team
-    end
-
-    local state_name = "Unknown"
-    if issue.state and type(issue.state) == "table" then
-      state_name = issue.state.name or "Unknown"
-    elseif type(issue.state) == "string" then
-      state_name = issue.state
-    end
-
-    local priority = issue.priority or 0
-
-    local priority_labels = {
-      [0] = "None",
-      [1] = "Urgent",
-      [2] = "High",
-      [3] = "Normal",
-      [4] = "Low",
-    }
-    local priority_str = priority_labels[priority] or tostring(priority)
-
-    table.insert(lines, "**Team:** " .. team_name)
-    table.insert(lines, "**State:** " .. state_name)
-    table.insert(lines, "**Priority:** " .. priority_str)
-
-    local assignee_name = "Unassigned"
-    if issue.assignee and type(issue.assignee) == "table" then
-      assignee_name = issue.assignee.name or "Unknown"
-    elseif issue.assignee and type(issue.assignee) == "string" then
-      assignee_name = issue.assignee
-    end
-    table.insert(lines, "**Assignee:** " .. assignee_name)
-
-    table.insert(lines, "")
-
-    if issue.createdAt then
-      table.insert(lines, "**Created:** " .. issue.createdAt)
-    end
-    if issue.updatedAt then
-      table.insert(lines, "**Updated:** " .. issue.updatedAt)
-    end
-    if issue.completedAt then
-      table.insert(lines, "**Completed:** " .. issue.completedAt)
-    end
-
-    table.insert(lines, "")
-    table.insert(lines, string.rep("-", 80))
-    table.insert(lines, "")
-
-    table.insert(lines, "## Description")
-    table.insert(lines, "")
-    table.insert(lines, "<!-- DESCRIPTION START -->")
-    if issue.description and issue.description ~= "" then
-      for line in issue.description:gmatch("[^\n]*") do
-        table.insert(lines, line)
+      local current_user_name = nil
+      if issue.assignee and type(issue.assignee) == "table" and issue.assignee.name then
+        current_user_name = issue.assignee.name
+      elseif issue.creator and type(issue.creator) == "table" and issue.creator.name then
+        current_user_name = issue.creator.name
       end
-    else
-      table.insert(lines, "(no description)")
-    end
-    table.insert(lines, "<!-- DESCRIPTION END -->")
 
-    table.insert(lines, "")
-    table.insert(lines, string.rep("-", 80))
-    table.insert(lines, "")
-
-    table.insert(lines, "## Comments")
-    table.insert(lines, "")
-
-    local comments_list = nil
-    if issue.comments then
-      if type(issue.comments) == "table" and issue.comments.nodes then
-        comments_list = issue.comments.nodes
-      elseif type(issue.comments) == "table" and #issue.comments > 0 then
-        comments_list = issue.comments
-      end
-    end
-
-    if comments_list and #comments_list > 0 then
-      for i, comment in ipairs(comments_list) do
-        local author_name = "Unknown"
-        if comment.user and type(comment.user) == "table" then
-          author_name = comment.user.name or "Unknown"
-        elseif type(comment.user) == "string" then
-          author_name = comment.user
-        end
-
-        local timestamp = comment.createdAt or "Unknown time"
-
-        local is_user_comment = (current_user_name and author_name == current_user_name)
-
-        table.insert(lines, "### Comment " .. i)
-        table.insert(lines, "**" .. author_name .. "** - " .. timestamp)
-        table.insert(lines, "")
-
-        if is_user_comment and comment.id then
-          table.insert(lines, "<!-- COMMENT ID: " .. comment.id .. " START -->")
-        end
-
-        if comment.body and comment.body ~= "" then
-          for line in comment.body:gmatch("[^\n]*") do
-            table.insert(lines, "  " .. line)
+      local buffer_name = 'linear://' .. resolved_id
+      local existing_bufnr = nil
+      for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_valid(buf) then
+          local name = vim.api.nvim_buf_get_name(buf)
+          if name == buffer_name then
+            existing_bufnr = buf
+            break
           end
-        else
-          table.insert(lines, "  (empty comment)")
         end
+      end
 
-        if is_user_comment and comment.id then
-          table.insert(lines, "<!-- COMMENT ID: " .. comment.id .. " END -->")
-        end
+      local bufnr
+      if existing_bufnr then
+        bufnr = existing_bufnr
+        vim.api.nvim_buf_set_option(bufnr, 'modifiable', true)
+      else
+        bufnr = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_name(bufnr, buffer_name)
+      end
 
+      vim.api.nvim_buf_set_option(bufnr, 'buftype', 'acwrite')
+      vim.api.nvim_buf_set_option(bufnr, 'filetype', 'markdown')
+
+      vim.api.nvim_buf_set_var(bufnr, 'linear_issue_id', resolved_id)
+      vim.api.nvim_buf_set_var(bufnr, 'linear_issue_data', issue)
+
+      local lines = {}
+
+      local identifier = issue.identifier or resolved_id
+      local title = issue.title or "(no title)"
+      table.insert(lines, "# " .. identifier .. ": " .. title)
+      table.insert(lines, "")
+
+      if issue.url then
+        table.insert(lines, "**URL:** " .. issue.url)
         table.insert(lines, "")
       end
-    else
-      table.insert(lines, "(no comments)")
-    end
 
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+      local team_name = "Unknown"
+      if issue.team and type(issue.team) == "table" then
+        team_name = issue.team.name or "Unknown"
+      elseif type(issue.team) == "string" then
+        team_name = issue.team
+      end
 
-    vim.api.nvim_create_autocmd('BufWriteCmd', {
-      buffer = bufnr,
-      callback = function()
-        save_issue_changes(bufnr)
-      end,
-    })
+      local state_name = "Unknown"
+      if issue.state and type(issue.state) == "table" then
+        state_name = issue.state.name or "Unknown"
+      elseif type(issue.state) == "string" then
+        state_name = issue.state
+      end
 
-    vim.api.nvim_buf_set_option(bufnr, 'modifiable', true)
+      local priority = issue.priority or 0
 
-    vim.api.nvim_set_current_buf(bufnr)
+      local priority_labels = {
+        [0] = "None",
+        [1] = "Urgent",
+        [2] = "High",
+        [3] = "Normal",
+        [4] = "Low",
+      }
+      local priority_str = priority_labels[priority] or tostring(priority)
 
-    vim.notify("Issue " .. issue_id .. " loaded (editable)", vim.log.levels.INFO)
+      table.insert(lines, "**Team:** " .. team_name)
+      table.insert(lines, "**State:** " .. state_name)
+      table.insert(lines, "**Priority:** " .. priority_str)
+
+      local assignee_name = "Unassigned"
+      if issue.assignee and type(issue.assignee) == "table" then
+        assignee_name = issue.assignee.name or "Unknown"
+      elseif issue.assignee and type(issue.assignee) == "string" then
+        assignee_name = issue.assignee
+      end
+      table.insert(lines, "**Assignee:** " .. assignee_name)
+
+      table.insert(lines, "")
+
+      if issue.createdAt then
+        table.insert(lines, "**Created:** " .. issue.createdAt)
+      end
+      if issue.updatedAt then
+        table.insert(lines, "**Updated:** " .. issue.updatedAt)
+      end
+      if issue.completedAt then
+        table.insert(lines, "**Completed:** " .. issue.completedAt)
+      end
+
+      table.insert(lines, "")
+      table.insert(lines, string.rep("-", 80))
+      table.insert(lines, "")
+
+      table.insert(lines, "## Description")
+      table.insert(lines, "")
+      table.insert(lines, "<!-- DESCRIPTION START -->")
+      if issue.description and issue.description ~= "" then
+        for line in issue.description:gmatch("[^\n]*") do
+          table.insert(lines, line)
+        end
+      else
+        table.insert(lines, "(no description)")
+      end
+      table.insert(lines, "<!-- DESCRIPTION END -->")
+
+      table.insert(lines, "")
+      table.insert(lines, string.rep("-", 80))
+      table.insert(lines, "")
+
+      table.insert(lines, "## Comments")
+      table.insert(lines, "")
+
+      local comments_list = nil
+      if issue.comments then
+        if type(issue.comments) == "table" and issue.comments.nodes then
+          comments_list = issue.comments.nodes
+        elseif type(issue.comments) == "table" and #issue.comments > 0 then
+          comments_list = issue.comments
+        end
+      end
+
+      if comments_list and #comments_list > 0 then
+        for i, comment in ipairs(comments_list) do
+          local author_name = "Unknown"
+          if comment.user and type(comment.user) == "table" then
+            author_name = comment.user.name or "Unknown"
+          elseif type(comment.user) == "string" then
+            author_name = comment.user
+          end
+
+          local timestamp = comment.createdAt or "Unknown time"
+
+          local is_user_comment = (current_user_name and author_name == current_user_name)
+
+          table.insert(lines, "### Comment " .. i)
+          table.insert(lines, "**" .. author_name .. "** - " .. timestamp)
+          table.insert(lines, "")
+
+          if is_user_comment and comment.id then
+            table.insert(lines, "<!-- COMMENT ID: " .. comment.id .. " START -->")
+          end
+
+          if comment.body and comment.body ~= "" then
+            for line in comment.body:gmatch("[^\n]*") do
+              table.insert(lines, "  " .. line)
+            end
+          else
+            table.insert(lines, "  (empty comment)")
+          end
+
+          if is_user_comment and comment.id then
+            table.insert(lines, "<!-- COMMENT ID: " .. comment.id .. " END -->")
+          end
+
+          table.insert(lines, "")
+        end
+      else
+        table.insert(lines, "(no comments)")
+      end
+
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+
+      vim.api.nvim_create_autocmd('BufWriteCmd', {
+        buffer = bufnr,
+        callback = function()
+          save_issue_changes(bufnr)
+        end,
+      })
+
+      vim.api.nvim_buf_set_option(bufnr, 'modifiable', true)
+
+      vim.api.nvim_set_current_buf(bufnr)
+
+      vim.notify("Issue " .. resolved_id .. " loaded (editable)", vim.log.levels.INFO)
+    end)
   end)
 end
 
 -- Changes issue state. Fetches issue to get team, fetches workflow states for team, prompts for selection.
 -- Auto-refreshes issue buffer if currently viewing the issue.
 function M.change_state(issue_id)
-  if not issue_id or issue_id == "" then
-    local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, 0, 'linear_issue_id')
-    if ok and buf_issue_id and buf_issue_id ~= "" then
-      issue_id = buf_issue_id
-    else
-      vim.ui.input({
-        prompt = 'Enter issue ID (e.g., ENG-123): ',
-      }, function(input)
-        if input and input ~= "" then
-          M.change_state(input)
-        end
-      end)
-      return
-    end
-  end
+  resolve_issue_id(issue_id, function(resolved_id)
+    vim.notify("Fetching issue " .. resolved_id .. "...", vim.log.levels.INFO)
 
-  vim.notify("Fetching issue " .. issue_id .. "...", vim.log.levels.INFO)
-
-  run_cli('get issue ' .. vim.fn.shellescape(issue_id) .. ' --json', function(issue, err)
-    if err then
-      vim.notify("Error fetching issue: " .. err, vim.log.levels.ERROR)
-      return
-    end
-
-    if not issue or not issue.team or not issue.team.id then
-      vim.notify("Unable to determine team for issue", vim.log.levels.ERROR)
-      return
-    end
-
-    local team_id = issue.team.id
-    vim.notify("Fetching workflow states for team " .. issue.team.name .. "...", vim.log.levels.INFO)
-
-    run_cli('states ' .. vim.fn.shellescape(team_id) .. ' --json', function(states, err)
+    run_cli('get issue ' .. vim.fn.shellescape(resolved_id) .. ' --json', function(issue, err)
       if err then
-        vim.notify("Error fetching workflow states: " .. err, vim.log.levels.ERROR)
+        vim.notify("Error fetching issue: " .. err, vim.log.levels.ERROR)
         return
       end
 
-      if not states or #states == 0 then
-        vim.notify("No workflow states found for team", vim.log.levels.WARN)
+      if not issue or not issue.team or not issue.team.id then
+        vim.notify("Unable to determine team for issue", vim.log.levels.ERROR)
         return
       end
 
-      vim.ui.select(states, {
-        prompt = 'Select new state:',
-        format_item = function(item)
-          return item.name .. " (" .. item.type .. ")"
-        end,
-      }, function(selected_state)
-        if not selected_state then
+      local team_id = issue.team.id
+      vim.notify("Fetching workflow states for team " .. issue.team.name .. "...", vim.log.levels.INFO)
+
+      run_cli('states ' .. vim.fn.shellescape(team_id) .. ' --json', function(states, err)
+        if err then
+          vim.notify("Error fetching workflow states: " .. err, vim.log.levels.ERROR)
           return
         end
 
-        vim.notify("Updating issue " .. issue_id .. " to state " .. selected_state.name .. "...", vim.log.levels.INFO)
+        if not states or #states == 0 then
+          vim.notify("No workflow states found for team", vim.log.levels.WARN)
+          return
+        end
 
-        local cmd = string.format(
-          'update-state %s %s --json',
-          vim.fn.shellescape(issue_id),
-          vim.fn.shellescape(selected_state.id)
-        )
-
-        run_cli(cmd, function(updated_issue, err)
-          if err then
-            vim.notify("Error updating issue state: " .. err, vim.log.levels.ERROR)
+        vim.ui.select(states, {
+          prompt = 'Select new state:',
+          format_item = function(item)
+            return item.name .. " (" .. item.type .. ")"
+          end,
+        }, function(selected_state)
+          if not selected_state then
             return
           end
 
-          vim.notify("Issue state updated successfully to: " .. selected_state.name, vim.log.levels.INFO)
+          vim.notify("Updating issue " .. resolved_id .. " to state " .. selected_state.name .. "...", vim.log.levels.INFO)
 
-          local current_buf = vim.api.nvim_get_current_buf()
-          local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, current_buf, 'linear_issue_id')
-          if ok and buf_issue_id == issue_id then
-            vim.schedule(function()
-              M.view_issue(issue_id)
-            end)
-          end
+          local cmd = string.format(
+            'update-state %s %s --json',
+            vim.fn.shellescape(resolved_id),
+            vim.fn.shellescape(selected_state.id)
+          )
+
+          run_cli(cmd, function(updated_issue, err)
+            if err then
+              vim.notify("Error updating issue state: " .. err, vim.log.levels.ERROR)
+              return
+            end
+
+            vim.notify("Issue state updated successfully to: " .. selected_state.name, vim.log.levels.INFO)
+
+            local current_buf = vim.api.nvim_get_current_buf()
+            local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, current_buf, 'linear_issue_id')
+            if ok and buf_issue_id == resolved_id then
+              vim.schedule(function()
+                M.view_issue(resolved_id)
+              end)
+            end
+          end)
         end)
       end)
     end)
@@ -984,82 +989,68 @@ end
 -- Assigns issue to a team member. Fetches issue to get team, fetches team members, prompts for selection.
 -- Auto-refreshes issue buffer if currently viewing the issue.
 function M.assign_issue(issue_id)
-  if not issue_id or issue_id == "" then
-    local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, 0, 'linear_issue_id')
-    if ok and buf_issue_id and buf_issue_id ~= "" then
-      issue_id = buf_issue_id
-    else
-      vim.ui.input({
-        prompt = 'Enter issue ID (e.g., ENG-123): ',
-      }, function(input)
-        if input and input ~= "" then
-          M.assign_issue(input)
-        end
-      end)
-      return
-    end
-  end
+  resolve_issue_id(issue_id, function(resolved_id)
+    vim.notify("Fetching issue " .. resolved_id .. "...", vim.log.levels.INFO)
 
-  vim.notify("Fetching issue " .. issue_id .. "...", vim.log.levels.INFO)
-
-  run_cli('get issue ' .. vim.fn.shellescape(issue_id) .. ' --json', function(issue, err)
-    if err then
-      vim.notify("Error fetching issue: " .. err, vim.log.levels.ERROR)
-      return
-    end
-
-    if not issue or not issue.team or not issue.team.id then
-      vim.notify("Unable to determine team for issue", vim.log.levels.ERROR)
-      return
-    end
-
-    local team_id = issue.team.id
-    vim.notify("Fetching team members for " .. issue.team.name .. "...", vim.log.levels.INFO)
-
-    run_cli('team-members ' .. vim.fn.shellescape(team_id) .. ' --json', function(members, err)
+    run_cli('get issue ' .. vim.fn.shellescape(resolved_id) .. ' --json', function(issue, err)
       if err then
-        vim.notify("Error fetching team members: " .. err, vim.log.levels.ERROR)
+        vim.notify("Error fetching issue: " .. err, vim.log.levels.ERROR)
         return
       end
 
-      if not members or #members == 0 then
-        vim.notify("No team members found", vim.log.levels.WARN)
+      if not issue or not issue.team or not issue.team.id then
+        vim.notify("Unable to determine team for issue", vim.log.levels.ERROR)
         return
       end
 
-      vim.ui.select(members, {
-        prompt = 'Select assignee:',
-        format_item = function(item)
-          return item.name .. " (" .. item.email .. ")"
-        end,
-      }, function(selected_member)
-        if not selected_member then
+      local team_id = issue.team.id
+      vim.notify("Fetching team members for " .. issue.team.name .. "...", vim.log.levels.INFO)
+
+      run_cli('team-members ' .. vim.fn.shellescape(team_id) .. ' --json', function(members, err)
+        if err then
+          vim.notify("Error fetching team members: " .. err, vim.log.levels.ERROR)
           return
         end
 
-        vim.notify("Assigning issue " .. issue_id .. " to " .. selected_member.name .. "...", vim.log.levels.INFO)
+        if not members or #members == 0 then
+          vim.notify("No team members found", vim.log.levels.WARN)
+          return
+        end
 
-        local cmd = string.format(
-          'assign %s %s --json',
-          vim.fn.shellescape(issue_id),
-          vim.fn.shellescape(selected_member.id)
-        )
-
-        run_cli(cmd, function(assigned_issue, err)
-          if err then
-            vim.notify("Error assigning issue: " .. err, vim.log.levels.ERROR)
+        vim.ui.select(members, {
+          prompt = 'Select assignee:',
+          format_item = function(item)
+            return item.name .. " (" .. item.email .. ")"
+          end,
+        }, function(selected_member)
+          if not selected_member then
             return
           end
 
-          vim.notify("Issue assigned successfully to: " .. selected_member.name, vim.log.levels.INFO)
+          vim.notify("Assigning issue " .. resolved_id .. " to " .. selected_member.name .. "...", vim.log.levels.INFO)
 
-          local current_buf = vim.api.nvim_get_current_buf()
-          local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, current_buf, 'linear_issue_id')
-          if ok and buf_issue_id == issue_id then
-            vim.schedule(function()
-              M.view_issue(issue_id)
-            end)
-          end
+          local cmd = string.format(
+            'assign %s %s --json',
+            vim.fn.shellescape(resolved_id),
+            vim.fn.shellescape(selected_member.id)
+          )
+
+          run_cli(cmd, function(assigned_issue, err)
+            if err then
+              vim.notify("Error assigning issue: " .. err, vim.log.levels.ERROR)
+              return
+            end
+
+            vim.notify("Issue assigned successfully to: " .. selected_member.name, vim.log.levels.INFO)
+
+            local current_buf = vim.api.nvim_get_current_buf()
+            local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, current_buf, 'linear_issue_id')
+            if ok and buf_issue_id == resolved_id then
+              vim.schedule(function()
+                M.view_issue(resolved_id)
+              end)
+            end
+          end)
         end)
       end)
     end)
@@ -1067,44 +1058,66 @@ function M.assign_issue(issue_id)
 end
 
 function M.unassign_issue(issue_id)
-  if not issue_id or issue_id == "" then
-    local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, 0, 'linear_issue_id')
-    if ok and buf_issue_id and buf_issue_id ~= "" then
-      issue_id = buf_issue_id
-    else
-      vim.ui.input({
-        prompt = 'Enter issue ID (e.g., ENG-123): ',
-      }, function(input)
-        if input and input ~= "" then
-          M.unassign_issue(input)
-        end
-      end)
-      return
-    end
-  end
+  resolve_issue_id(issue_id, function(resolved_id)
+    vim.notify("Unassigning issue " .. resolved_id .. "...", vim.log.levels.INFO)
 
-  vim.notify("Unassigning issue " .. issue_id .. "...", vim.log.levels.INFO)
+    local cmd = string.format(
+      'unassign %s --json',
+      vim.fn.shellescape(resolved_id)
+    )
 
-  local cmd = string.format(
-    'unassign %s --json',
-    vim.fn.shellescape(issue_id)
-  )
+    run_cli(cmd, function(unassigned_issue, err)
+      if err then
+        vim.notify("Error unassigning issue: " .. err, vim.log.levels.ERROR)
+        return
+      end
 
-  run_cli(cmd, function(unassigned_issue, err)
-    if err then
-      vim.notify("Error unassigning issue: " .. err, vim.log.levels.ERROR)
-      return
-    end
+      vim.notify("Issue unassigned successfully", vim.log.levels.INFO)
 
-    vim.notify("Issue unassigned successfully", vim.log.levels.INFO)
+      local current_buf = vim.api.nvim_get_current_buf()
+      local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, current_buf, 'linear_issue_id')
+      if ok and buf_issue_id == resolved_id then
+        vim.schedule(function()
+          M.view_issue(resolved_id)
+        end)
+      end
+    end)
+  end)
+end
 
-    local current_buf = vim.api.nvim_get_current_buf()
-    local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, current_buf, 'linear_issue_id')
-    if ok and buf_issue_id == issue_id then
-      vim.schedule(function()
-        M.view_issue(issue_id)
-      end)
-    end
+-- Takes (self-assigns) an issue to the current user.
+-- Context-aware: tries buffer variables (linear_issue_id, linear_issue_map), falls back to prompt.
+function M.take_issue(issue_id)
+  resolve_issue_id(issue_id, function(resolved_id)
+    vim.notify("Taking issue " .. resolved_id .. "...", vim.log.levels.INFO)
+
+    local cmd = string.format(
+      'take %s --json',
+      vim.fn.shellescape(resolved_id)
+    )
+
+    run_cli(cmd, function(taken_issue, err)
+      if err then
+        vim.notify("Error taking issue: " .. err, vim.log.levels.ERROR)
+        return
+      end
+
+      local assignee_name = "Unknown"
+      if taken_issue.assignee and type(taken_issue.assignee) == "table" then
+        assignee_name = taken_issue.assignee.name or "Unknown"
+      end
+
+      vim.notify("Issue taken successfully, assigned to: " .. assignee_name, vim.log.levels.INFO)
+
+      -- Auto-refresh if we're viewing this issue
+      local current_buf = vim.api.nvim_get_current_buf()
+      local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, current_buf, 'linear_issue_id')
+      if ok and buf_issue_id == resolved_id then
+        vim.schedule(function()
+          M.view_issue(resolved_id)
+        end)
+      end
+    end)
   end)
 end
 
@@ -1141,6 +1154,12 @@ function M.setup()
   end, {
     nargs = '?',
     desc = 'Unassign a Linear issue (remove assignee)',
+  })
+  vim.api.nvim_create_user_command('LinearTake', function(opts)
+    M.take_issue(opts.args)
+  end, {
+    nargs = '?',
+    desc = 'Take (self-assign) a Linear issue to yourself',
   })
 end
 

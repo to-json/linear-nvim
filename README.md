@@ -117,7 +117,7 @@ The included `linear.lua` plugin provides integrated Linear workflows inside Neo
 
 ```lua
 {
-  dir = "~/hc/linear-cli",  -- or wherever you cloned it
+  dir = "~/code/linear-cli",  -- or wherever you cloned it
   ft = "markdown",
   config = function()
     require("linear").setup()
@@ -129,7 +129,7 @@ The included `linear.lua` plugin provides integrated Linear workflows inside Neo
 
 ```lua
 use {
-  "~/hc/linear-cli",
+  "~/code/linear-cli",
   config = function()
     require("linear").setup()
   end

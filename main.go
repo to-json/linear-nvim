@@ -1056,6 +1056,36 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "take" {
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: linear-cli take <issue-id> [--json]")
+			os.Exit(1)
+		}
+		issueID := os.Args[2]
+		jsonOutput := hasJSONFlag()
+
+		issue, err := takeIssue(apiKey, issueID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error taking issue: %v\n", err)
+			os.Exit(1)
+		}
+
+		if jsonOutput {
+			if err := outputJSON(issue); err != nil {
+				fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Printf("Issue taken successfully\n")
+			fmt.Printf("  Issue: %s\n", issue.Identifier)
+			fmt.Printf("  Title: %s\n", issue.Title)
+			if issue.Assignee != nil {
+				fmt.Printf("  Assigned to: %s (%s)\n", issue.Assignee.Name, issue.Assignee.Email)
+			}
+		}
+		return
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "team-members" {
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: linear-cli team-members <team-id> [--json]")
@@ -1751,6 +1781,21 @@ func unassignIssue(apiKey string, issueID string) (*Issue, error) {
 		return nil, fmt.Errorf("failed to unassign issue")
 	}
 	return issue, nil
+}
+
+func takeIssue(apiKey string, issueID string) (*Issue, error) {
+	// First, get the viewer's ID
+	viewerData, err := executeGraphQL(apiKey, buildViewerIDQuery(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get viewer ID: %w", err)
+	}
+	viewerID, err := parseViewerIDResponse(viewerData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse viewer ID: %w", err)
+	}
+
+	// Now assign the issue to the viewer
+	return assignIssue(apiKey, issueID, viewerID)
 }
 
 func updateIssueDescription(apiKey string, issueID string, description string) (*Issue, error) {
