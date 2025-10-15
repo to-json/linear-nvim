@@ -184,6 +184,21 @@ query GetIssue($id: String!) {
       name
       key
     }
+    parent {
+      id
+      identifier
+      title
+    }
+    children {
+      nodes {
+        id
+        identifier
+        title
+        state {
+          name
+        }
+      }
+    }
     labels {
       nodes {
         name
@@ -797,6 +812,21 @@ type Issue struct {
 		Name string `json:"name"`
 		Key  string `json:"key"`
 	} `json:"team"`
+	Parent *struct {
+		ID         string `json:"id"`
+		Identifier string `json:"identifier"`
+		Title      string `json:"title"`
+	} `json:"parent"`
+	Children struct {
+		Nodes []struct {
+			ID         string `json:"id"`
+			Identifier string `json:"identifier"`
+			Title      string `json:"title"`
+			State      struct {
+				Name string `json:"name"`
+			} `json:"state"`
+		} `json:"nodes"`
+	} `json:"children"`
 	Labels struct {
 		Nodes []struct {
 			Name  string `json:"name"`
@@ -961,9 +991,27 @@ func main() {
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "create" {
-		if err := interactiveCreateIssue(apiKey); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating issue: %v\n", err)
-			os.Exit(1)
+		// Check if flags are provided for non-interactive mode
+		hasFlags := false
+		for _, arg := range os.Args[2:] {
+			if strings.HasPrefix(arg, "--") {
+				hasFlags = true
+				break
+			}
+		}
+
+		if hasFlags {
+			// Non-interactive create with flags
+			if err := nonInteractiveCreateIssue(apiKey, os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating issue: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			// Interactive create
+			if err := interactiveCreateIssue(apiKey); err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating issue: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		return
 	}
@@ -1478,6 +1526,70 @@ func printTemplates(templatesByTeam map[string][]Template) {
 	}
 }
 
+func nonInteractiveCreateIssue(apiKey string, args []string) error {
+	var teamID, title, description, projectID string
+	var priority int
+
+	// Parse flags
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--team=") {
+			teamID = strings.TrimPrefix(arg, "--team=")
+		} else if strings.HasPrefix(arg, "--title=") {
+			title = strings.TrimPrefix(arg, "--title=")
+		} else if strings.HasPrefix(arg, "--description=") {
+			description = strings.TrimPrefix(arg, "--description=")
+		} else if strings.HasPrefix(arg, "--project=") {
+			projectID = strings.TrimPrefix(arg, "--project=")
+		} else if strings.HasPrefix(arg, "--priority=") {
+			priorityStr := strings.TrimPrefix(arg, "--priority=")
+			p, err := strconv.Atoi(priorityStr)
+			if err == nil && p >= 0 && p <= 4 {
+				priority = p
+			}
+		}
+	}
+
+	// Validate required fields
+	if teamID == "" {
+		return fmt.Errorf("--team is required")
+	}
+	if title == "" {
+		return fmt.Errorf("--title is required")
+	}
+
+	// Create the issue
+	variables := map[string]interface{}{
+		"teamId":      teamID,
+		"title":       title,
+		"description": description,
+		"priority":    priority,
+	}
+	if projectID != "" {
+		variables["projectId"] = projectID
+	}
+
+	data, err := executeGraphQL(apiKey, buildCreateIssueMutation(), variables)
+	if err != nil {
+		return err
+	}
+
+	success, issue, err := parseCreateIssueResponse(data)
+	if err != nil {
+		return err
+	}
+
+	if !success {
+		return fmt.Errorf("failed to create issue")
+	}
+
+	fmt.Printf("Issue created successfully!\n")
+	fmt.Printf("ID: %s\n", issue.Identifier)
+	fmt.Printf("Title: %s\n", issue.Title)
+	fmt.Printf("URL: %s\n", issue.URL)
+
+	return nil
+}
+
 func interactiveCreateIssue(apiKey string) error {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -1928,6 +2040,10 @@ func printIssueDetails(issue *Issue) {
 		fmt.Printf("Assignee: %s\n", issue.Assignee.Name)
 	}
 
+	if issue.Parent != nil {
+		fmt.Printf("Parent Issue: [%s] %s\n", issue.Parent.Identifier, issue.Parent.Title)
+	}
+
 	fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
 	fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
 
@@ -1937,6 +2053,14 @@ func printIssueDetails(issue *Issue) {
 
 	if issue.Description != "" {
 		fmt.Printf("\nDescription:\n%s\n", issue.Description)
+	}
+
+	// Print sub-issues if any
+	if len(issue.Children.Nodes) > 0 {
+		fmt.Printf("\nSub-Issues:\n")
+		for _, child := range issue.Children.Nodes {
+			fmt.Printf("  [%s] %s (%s)\n", child.Identifier, child.Title, child.State.Name)
+		}
 	}
 
 	// Print comments if any

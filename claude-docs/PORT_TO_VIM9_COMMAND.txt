@@ -1,0 +1,24 @@
+Port the Neovim Lua plugin at /Users/jaesaxon/hc/linear-cli/linear.lua to vim9script and save it as /Users/jaesaxon/hc/linear-cli/linear.vim
+
+Requirements:
+- Use blocking operations (system() instead of jobstart)
+- Replace vim.ui.select() with numbered menus using input()
+- Replace vim.ui.input() with input()
+- Replace vim.notify() with echo/echoerr
+- Use json_decode() for JSON parsing
+- Keep all the same functionality: view issue, comment, create, take, assign, export, etc.
+- Keep context-aware issue ID resolution (explicit arg -> buffer var -> issue map -> prompt)
+- Keep the skip_buffer parameter for ViewIssue
+- Keep all buffer editing features (acwrite buffers for issues/comments/create)
+- Keep autocmds for saving changes
+- Register all the same commands
+
+The user is okay with blocking operations and simpler UI - they just want it to work in regular Vim (not just Neovim).
+
+Make sure to:
+1. Read the full linear.lua file to understand all functions
+2. Port each function to vim9script syntax
+3. Test that the vim9script syntax is correct
+4. Create the linear.vim file with complete functionality
+
+NOTE: A partial vim9script version has already been created at linear.vim but needs validation/completion.

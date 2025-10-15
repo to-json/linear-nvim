@@ -119,8 +119,17 @@ The included `linear.lua` plugin provides integrated Linear workflows inside Neo
 {
   dir = "~/code/linear-cli",  -- or wherever you cloned it
   ft = "markdown",
+  keys = {
+    { "<leader>lt", "<cmd>LinearTake<cr>", desc = "Take issue" },
+    { "<leader>lv", "<cmd>LinearViewIssue<cr>", desc = "View issue" },
+    { "<leader>lc", "<cmd>LinearComment<cr>", desc = "Add comment" },
+    { "<leader>ls", "<cmd>LinearChangeState<cr>", desc = "Change state" },
+    { "<leader>le", "<cmd>LinearExport<cr>", desc = "Export issue" },
+  },
   config = function()
-    require("linear").setup()
+    require("linear").setup({
+      export_dir = "~/.linear/past-tickets"  -- optional, customize export location
+    })
   end,
 }
 ```
@@ -141,19 +150,34 @@ use {
 - `:LinearCreate` - Interactive issue creation with template support
 - `:LinearProjectIssues` - Browse issues by project, press `<CR>` to view
 - `:LinearViewIssue [id]` - View issue with full details (editable)
-- `:LinearAddComment [id]` - Add comment to issue
+- `:LinearComment [id]` - Add comment with buffer editor (markdown support)
+- `:LinearMiniComment [id]` - Add comment with quick modal input
 - `:LinearChangeState [id]` - Change issue workflow state
 - `:LinearAssign [id]` - Assign issue to team member
 - `:LinearUnassign [id]` - Remove assignee
+- `:LinearTake [id]` - Self-assign issue to yourself
+- `:LinearExport [id]` - Export issue to markdown file
+
+**Context-aware**: All commands work without `[id]` argument - they detect issue from current buffer (viewing issue or issue list at cursor)
 
 ### Editing Issues
 
-When viewing an issue with `:LinearViewIssue`, you can:
+When viewing an issue with `:LinearViewIssue`:
 
 1. Edit the description (marked with `<!-- DESCRIPTION START/END -->`)
 2. Edit your own comments (marked with `<!-- COMMENT ID: ... -->`)
-3. Save changes with `:w` - automatically syncs to Linear
-4. Changes are auto-refreshed after saving
+3. Save with `:w` - automatically syncs to Linear
+
+### Configuration
+
+```lua
+require("linear").setup({
+  export_dir = "~/.linear/past-tickets"  -- optional, default shown
+})
+```
+
+**Options**:
+- `export_dir` - Directory for `:LinearExport` command (default: `~/.linear/past-tickets`)
 
 ### Plugin Requirements
 

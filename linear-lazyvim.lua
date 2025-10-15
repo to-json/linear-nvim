@@ -13,6 +13,7 @@ return {
     { "<leader>Tv", "<cmd>LinearViewIssue<cr>",     desc = "View Linear issue" },
     { "<leader>Tm", "<cmd>LinearAddComment<cr>",    desc = "Add comment" },
     { "<leader>Ts", "<cmd>LinearChangeState<cr>",   desc = "Change state" },
+    { "<leader>Tt", "<cmd>LinearTake<cr>",          desc = "Assign issue to yourself" },
     { "<leader>Ta", "<cmd>LinearAssign<cr>",        desc = "Assign issue" },
     { "<leader>Tu", "<cmd>LinearUnassign<cr>",      desc = "Unassign issue" },
   },

@@ -1,5 +1,10 @@
 local M = {}
 
+-- Configuration with defaults
+M.config = {
+  export_dir = vim.fn.expand('$HOME') .. '/.linear/past-tickets'
+}
+
 -- Try to find linear-cli in GOPATH first, fall back to local path
 local function find_cli()
   local gopath = vim.fn.system('go env GOPATH'):gsub('\n', '')
@@ -62,22 +67,25 @@ end
 -- Resolves issue_id from multiple sources and invokes callback with resolved ID.
 -- Detection order:
 --   1. Explicit issue_id argument (if non-empty string)
---   2. Buffer variable 'linear_issue_id' (when viewing an issue buffer)
+--   2. Buffer variable 'linear_issue_id' (when viewing an issue buffer) [optional, can skip]
 --   3. Buffer variable 'linear_issue_map' + cursor position (when in issue list buffer)
 --   4. Prompt user via vim.ui.input (fallback)
 -- Callback signature: callback(resolved_issue_id)
-local function resolve_issue_id(issue_id, callback)
+-- skip_buffer: if true, skip checking linear_issue_id from current buffer (step 2)
+local function resolve_issue_id(issue_id, callback, skip_buffer)
   -- Check explicit argument
   if issue_id and issue_id ~= "" then
     callback(issue_id)
     return
   end
 
-  -- Try to get from current buffer's linear_issue_id
-  local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, 0, 'linear_issue_id')
-  if ok and buf_issue_id and buf_issue_id ~= "" then
-    callback(buf_issue_id)
-    return
+  -- Try to get from current buffer's linear_issue_id (unless skip_buffer is true)
+  if not skip_buffer then
+    local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, 0, 'linear_issue_id')
+    if ok and buf_issue_id and buf_issue_id ~= "" then
+      callback(buf_issue_id)
+      return
+    end
   end
 
   -- Try to get from issue list buffer's linear_issue_map
@@ -180,6 +188,13 @@ end
 local function create_issue_buffer(team, project, template)
   local bufnr = vim.api.nvim_create_buf(false, true)
 
+  -- Set a unique buffer name for the create issue buffer
+  local buffer_name = 'linear-create://' .. team.key
+  if project then
+    buffer_name = buffer_name .. '/' .. project.name:gsub('[^%w-]', '_')
+  end
+  vim.api.nvim_buf_set_name(bufnr, buffer_name)
+
   vim.api.nvim_buf_set_option(bufnr, 'buftype', 'acwrite')
   vim.api.nvim_buf_set_option(bufnr, 'filetype', 'markdown')
 
@@ -254,8 +269,8 @@ function M.submit_issue(bufnr, team, project)
   end
 
   local cmd = string.format(
-    'cd %s && ./linear-cli create --team=%s --title=%s --priority=%d',
-    vim.fn.expand('$HOME/hc/linear-cli'),
+    '%s create --team=%s --title=%s --priority=%d',
+    LINEAR_CLI,
     vim.fn.shellescape(team.id),
     vim.fn.shellescape(issue.title),
     issue.priority
@@ -270,32 +285,46 @@ function M.submit_issue(bufnr, team, project)
   end
 
   vim.notify("Creating issue...", vim.log.levels.INFO)
+  vim.notify("Running: " .. cmd, vim.log.levels.DEBUG)
+
+  local stdout_data = {}
+  local stderr_data = {}
 
   vim.fn.jobstart(cmd, {
     stdout_buffered = true,
+    stderr_buffered = true,
     on_stdout = function(_, data)
       if data then
-        local output = table.concat(data, '\n')
-        if output:match("created successfully") or output:match("URL:") then
-          vim.notify("Issue created successfully!", vim.log.levels.INFO)
-          vim.api.nvim_buf_set_option(bufnr, 'modified', false)
-          vim.schedule(function()
-            vim.api.nvim_buf_delete(bufnr, {force = true})
-          end)
-        end
+        vim.list_extend(stdout_data, data)
       end
     end,
     on_stderr = function(_, data)
-      if data and #data > 0 then
-        local err = table.concat(data, '\n')
-        if err ~= "" then
-          vim.notify("Error: " .. err, vim.log.levels.ERROR)
-        end
+      if data then
+        vim.list_extend(stderr_data, data)
       end
     end,
     on_exit = function(_, code)
-      if code ~= 0 then
-        vim.notify("Failed to create issue (exit code: " .. code .. ")", vim.log.levels.ERROR)
+      local stdout = table.concat(stdout_data, '\n')
+      local stderr = table.concat(stderr_data, '\n')
+
+      if code == 0 then
+        vim.notify("Issue created successfully!", vim.log.levels.INFO)
+        if stdout ~= "" then
+          vim.notify("Output: " .. stdout, vim.log.levels.INFO)
+        end
+        vim.api.nvim_buf_set_option(bufnr, 'modified', false)
+        vim.schedule(function()
+          vim.api.nvim_buf_delete(bufnr, {force = true})
+        end)
+      else
+        local err_msg = "Failed to create issue (exit code: " .. code .. ")"
+        if stderr ~= "" then
+          err_msg = err_msg .. "\nStderr: " .. stderr
+        end
+        if stdout ~= "" then
+          err_msg = err_msg .. "\nStdout: " .. stdout
+        end
+        vim.notify(err_msg, vim.log.levels.ERROR)
       end
     end,
   })
@@ -515,9 +544,10 @@ function M.create_issue()
   end)
 end
 
--- Adds a comment to an issue. Tries to get issue_id from argument, buffer variable, or prompts.
+-- Adds a comment to an issue using a vim.ui.input modal prompt.
+-- Tries to get issue_id from argument, buffer variable, or prompts.
 -- Auto-refreshes issue buffer if currently viewing the issue.
-function M.add_comment(issue_id)
+function M.add_minicomment(issue_id)
   resolve_issue_id(issue_id, function(resolved_id)
     vim.ui.input({
       prompt = 'Comment text: ',
@@ -554,6 +584,120 @@ function M.add_comment(issue_id)
         end
       end)
     end)
+  end)
+end
+
+-- Creates a comment buffer for writing a comment with markdown support.
+-- Returns the buffer number with autocmd set up for submission.
+local function create_comment_buffer(issue_id)
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local buffer_name = 'linear-comment://' .. issue_id
+  vim.api.nvim_buf_set_name(bufnr, buffer_name)
+
+  vim.api.nvim_buf_set_option(bufnr, 'buftype', 'acwrite')
+  vim.api.nvim_buf_set_option(bufnr, 'filetype', 'markdown')
+
+  local lines = {
+    "# LINEAR COMMENT",
+    "# Issue: " .. issue_id,
+    "",
+    "# Write your comment below (markdown supported):",
+    "",
+    "",
+    "# ---",
+    "# Save this buffer (:w) to submit the comment",
+    "# Close without saving (:q!) to cancel",
+  }
+
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+
+  vim.api.nvim_buf_set_var(bufnr, 'linear_comment_issue_id', issue_id)
+
+  vim.api.nvim_create_autocmd('BufWriteCmd', {
+    buffer = bufnr,
+    callback = function()
+      M.submit_comment(bufnr, issue_id)
+    end,
+  })
+
+  return bufnr
+end
+
+-- Extracts comment text from comment buffer and submits it.
+-- Skips header/instruction lines (lines starting with #).
+function M.submit_comment(bufnr, issue_id)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+  local comment_lines = {}
+  local in_comment_section = false
+
+  for _, line in ipairs(lines) do
+    -- Start capturing after the "Write your comment below" header
+    if line:match("^# Write your comment below") then
+      in_comment_section = true
+    elseif line:match("^# %-%-%-") then
+      -- Stop capturing when we hit the instructions footer
+      break
+    elseif in_comment_section and not line:match("^#") then
+      table.insert(comment_lines, line)
+    end
+  end
+
+  local comment_text = table.concat(comment_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+
+  if comment_text == "" then
+    vim.notify("Comment text is required", vim.log.levels.ERROR)
+    return
+  end
+
+  vim.notify("Adding comment to " .. issue_id .. "...", vim.log.levels.INFO)
+
+  local cmd = string.format(
+    'comment %s %s --json',
+    vim.fn.shellescape(issue_id),
+    vim.fn.shellescape(comment_text)
+  )
+
+  run_cli(cmd, function(result, err)
+    if err then
+      vim.notify("Error adding comment: " .. err, vim.log.levels.ERROR)
+      return
+    end
+
+    local comment_id = result and result.id or "unknown"
+    vim.notify("Comment added successfully (ID: " .. comment_id .. ")", vim.log.levels.INFO)
+
+    vim.api.nvim_buf_set_option(bufnr, 'modified', false)
+    vim.schedule(function()
+      vim.api.nvim_buf_delete(bufnr, {force = true})
+    end)
+
+    -- Auto-refresh if we're viewing this issue in another buffer
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(buf) and buf ~= bufnr then
+        local ok, buf_issue_id = pcall(vim.api.nvim_buf_get_var, buf, 'linear_issue_id')
+        if ok and buf_issue_id == issue_id then
+          vim.schedule(function()
+            M.view_issue(issue_id)
+          end)
+          break
+        end
+      end
+    end
+  end)
+end
+
+-- Adds a comment to an issue using a buffer-based editor.
+-- Tries to get issue_id from argument, buffer variable, or prompts.
+-- Opens a markdown buffer for writing the comment, submits on :w.
+-- Auto-refreshes issue buffer if currently viewing the issue.
+function M.add_comment(issue_id)
+  resolve_issue_id(issue_id, function(resolved_id)
+    local bufnr = create_comment_buffer(resolved_id)
+    vim.api.nvim_set_current_buf(bufnr)
+
+    -- Position cursor at the comment text area (line 6, after headers)
+    vim.api.nvim_win_set_cursor(0, {6, 0})
   end)
 end
 
@@ -717,6 +861,7 @@ end
 -- Edit markers (<!-- ... -->) indicate editable sections. Save with :w to post changes.
 -- Reuses existing buffer if one with this issue_id already exists.
 function M.view_issue(issue_id)
+  -- Skip buffer check so opening a ticket from within a ticket doesn't just re-open same ticket
   resolve_issue_id(issue_id, function(resolved_id)
     vim.notify("Fetching issue " .. resolved_id .. "...", vim.log.levels.INFO)
 
@@ -814,6 +959,12 @@ function M.view_issue(issue_id)
       end
       table.insert(lines, "**Assignee:** " .. assignee_name)
 
+      if issue.parent and type(issue.parent) == "table" then
+        local parent_identifier = issue.parent.identifier or "???"
+        local parent_title = issue.parent.title or "(no title)"
+        table.insert(lines, "**Parent Issue:** [" .. parent_identifier .. "] " .. parent_title)
+      end
+
       table.insert(lines, "")
 
       if issue.createdAt then
@@ -845,6 +996,31 @@ function M.view_issue(issue_id)
       table.insert(lines, "")
       table.insert(lines, string.rep("-", 80))
       table.insert(lines, "")
+
+      -- Print sub-issues if any
+      local children_list = nil
+      if issue.children then
+        if type(issue.children) == "table" and issue.children.nodes then
+          children_list = issue.children.nodes
+        end
+      end
+
+      if children_list and #children_list > 0 then
+        table.insert(lines, "## Sub-Issues")
+        table.insert(lines, "")
+        for _, child in ipairs(children_list) do
+          local child_identifier = child.identifier or "???"
+          local child_title = child.title or "(no title)"
+          local child_state = "Unknown"
+          if child.state and type(child.state) == "table" then
+            child_state = child.state.name or "Unknown"
+          end
+          table.insert(lines, "- [" .. child_identifier .. "] " .. child_title .. " (" .. child_state .. ")")
+        end
+        table.insert(lines, "")
+        table.insert(lines, string.rep("-", 80))
+        table.insert(lines, "")
+      end
 
       table.insert(lines, "## Comments")
       table.insert(lines, "")
@@ -912,7 +1088,219 @@ function M.view_issue(issue_id)
 
       vim.notify("Issue " .. resolved_id .. " loaded (editable)", vim.log.levels.INFO)
     end)
+  end, true)  -- skip_buffer = true: don't re-open same issue when already viewing one
+end
+
+-- Exports issue with comments to a markdown file.
+-- No editing markup, includes all comments (not just user's), suitable for archiving/reading.
+function M.export_issue(issue_id)
+  resolve_issue_id(issue_id, function(resolved_id)
+    vim.notify("Exporting issue " .. resolved_id .. "...", vim.log.levels.INFO)
+
+    run_cli('get issue ' .. vim.fn.shellescape(resolved_id) .. ' --json', function(issue, err)
+      if err then
+        vim.notify("Error fetching issue: " .. err, vim.log.levels.ERROR)
+        return
+      end
+
+      if not issue then
+        vim.notify("No issue data returned", vim.log.levels.ERROR)
+        return
+      end
+
+      -- Build export path
+      local export_dir = vim.fn.expand(M.config.export_dir)
+      local filepath = export_dir .. '/' .. resolved_id .. '.md'
+
+      -- Check if directory exists, create if needed
+      if vim.fn.isdirectory(export_dir) == 0 then
+        local mkdir_result = vim.fn.mkdir(export_dir, 'p')
+        if mkdir_result == 0 then
+          vim.notify("Failed to create directory: " .. export_dir, vim.log.levels.ERROR)
+          return
+        end
+      end
+
+      -- Check if file exists and prompt user
+      if vim.fn.filereadable(filepath) == 1 then
+        vim.ui.input({
+          prompt = 'File exists. Overwrite? (y/n): ',
+          default = 'n',
+        }, function(input)
+          if not input or input:lower() ~= 'y' then
+            vim.notify("Export cancelled", vim.log.levels.INFO)
+            return
+          end
+
+          -- User confirmed, proceed with export
+          write_export_file(issue, resolved_id, filepath)
+        end)
+      else
+        -- File doesn't exist, proceed directly
+        write_export_file(issue, resolved_id, filepath)
+      end
+    end)
   end)
+end
+
+-- Helper function to write the export file
+local function write_export_file(issue, resolved_id, filepath)
+  local lines = {}
+
+  local identifier = issue.identifier or resolved_id
+  local title = issue.title or "(no title)"
+  table.insert(lines, "# [" .. identifier .. "] " .. title)
+  table.insert(lines, "")
+
+  if issue.url then
+    table.insert(lines, "**URL:** " .. issue.url)
+  end
+
+  local team_name = "Unknown"
+  if issue.team and type(issue.team) == "table" then
+    team_name = issue.team.name or "Unknown"
+  elseif type(issue.team) == "string" then
+    team_name = issue.team
+  end
+  table.insert(lines, "**Team:** " .. team_name)
+
+  local state_name = "Unknown"
+  if issue.state and type(issue.state) == "table" then
+    state_name = issue.state.name or "Unknown"
+  elseif type(issue.state) == "string" then
+    state_name = issue.state
+  end
+  table.insert(lines, "**State:** " .. state_name)
+
+  local priority = issue.priority or 0
+  local priority_labels = {
+    [0] = "None",
+    [1] = "Urgent",
+    [2] = "High",
+    [3] = "Normal",
+    [4] = "Low",
+  }
+  local priority_str = priority_labels[priority] or tostring(priority)
+  table.insert(lines, "**Priority:** " .. priority_str)
+
+  local assignee_name = "Unassigned"
+  if issue.assignee and type(issue.assignee) == "table" then
+    assignee_name = issue.assignee.name or "Unassigned"
+  elseif issue.assignee and type(issue.assignee) == "string" then
+    assignee_name = issue.assignee
+  end
+  table.insert(lines, "**Assignee:** " .. assignee_name)
+
+  if issue.parent and type(issue.parent) == "table" then
+    local parent_identifier = issue.parent.identifier or "???"
+    local parent_title = issue.parent.title or "(no title)"
+    table.insert(lines, "**Parent Issue:** [" .. parent_identifier .. "] " .. parent_title)
+  end
+
+  if issue.createdAt then
+    table.insert(lines, "**Created:** " .. issue.createdAt)
+  end
+  if issue.updatedAt then
+    table.insert(lines, "**Updated:** " .. issue.updatedAt)
+  end
+  if issue.completedAt then
+    table.insert(lines, "**Completed:** " .. issue.completedAt)
+  end
+
+  table.insert(lines, "")
+  table.insert(lines, "## Description")
+  table.insert(lines, "")
+
+  if issue.description and issue.description ~= "" then
+    for line in issue.description:gmatch("[^\n]*") do
+      table.insert(lines, line)
+    end
+  else
+    table.insert(lines, "(no description)")
+  end
+
+  table.insert(lines, "")
+
+  -- Print sub-issues if any
+  local children_list = nil
+  if issue.children then
+    if type(issue.children) == "table" and issue.children.nodes then
+      children_list = issue.children.nodes
+    end
+  end
+
+  if children_list and #children_list > 0 then
+    table.insert(lines, "## Sub-Issues")
+    table.insert(lines, "")
+    for _, child in ipairs(children_list) do
+      local child_identifier = child.identifier or "???"
+      local child_title = child.title or "(no title)"
+      local child_state = "Unknown"
+      if child.state and type(child.state) == "table" then
+        child_state = child.state.name or "Unknown"
+      end
+      table.insert(lines, "- [" .. child_identifier .. "] " .. child_title .. " (" .. child_state .. ")")
+    end
+    table.insert(lines, "")
+  end
+
+  table.insert(lines, "## Comments")
+  table.insert(lines, "")
+
+  local comments_list = nil
+  if issue.comments then
+    if type(issue.comments) == "table" and issue.comments.nodes then
+      comments_list = issue.comments.nodes
+    elseif type(issue.comments) == "table" and #issue.comments > 0 then
+      comments_list = issue.comments
+    end
+  end
+
+  if comments_list and #comments_list > 0 then
+    for _, comment in ipairs(comments_list) do
+      local author_name = "Unknown"
+      if comment.user and type(comment.user) == "table" then
+        author_name = comment.user.name or "Unknown"
+      elseif type(comment.user) == "string" then
+        author_name = comment.user
+      end
+
+      local timestamp = comment.createdAt or "Unknown time"
+
+      table.insert(lines, "### Comment by " .. author_name .. " - " .. timestamp)
+      table.insert(lines, "")
+
+      if comment.body and comment.body ~= "" then
+        for line in comment.body:gmatch("[^\n]*") do
+          table.insert(lines, line)
+        end
+      else
+        table.insert(lines, "(empty comment)")
+      end
+
+      table.insert(lines, "")
+    end
+  else
+    table.insert(lines, "(no comments)")
+  end
+
+  -- Write to file
+  local write_result = vim.fn.writefile(lines, filepath)
+  if write_result == -1 then
+    vim.notify("Failed to write file: " .. filepath, vim.log.levels.ERROR)
+  else
+    vim.notify("Exported to: " .. filepath, vim.log.levels.INFO)
+
+    -- Optionally open the file in a buffer
+    vim.ui.input({
+      prompt = 'Open file in buffer? (y/n): ',
+      default = 'y',
+    }, function(input)
+      if input and input:lower() == 'y' then
+        vim.cmd('edit ' .. vim.fn.fnameescape(filepath))
+      end
+    end)
+  end
 end
 
 -- Changes issue state. Fetches issue to get team, fetches workflow states for team, prompts for selection.
@@ -1121,7 +1509,14 @@ function M.take_issue(issue_id)
   end)
 end
 
-function M.setup()
+function M.setup(opts)
+  -- Merge user config with defaults
+  if opts then
+    if opts.export_dir then
+      M.config.export_dir = vim.fn.expand(opts.export_dir)
+    end
+  end
+
   vim.api.nvim_create_user_command('LinearCreate', M.create_issue, {})
   vim.api.nvim_create_user_command('LinearIssue', M.create_issue, {})
   vim.api.nvim_create_user_command('LinearProjectIssues', M.list_project_issues, {})
@@ -1131,11 +1526,23 @@ function M.setup()
     nargs = '?',
     desc = 'View a Linear issue with full details and comments',
   })
+  vim.api.nvim_create_user_command('LinearComment', function(opts)
+    M.add_comment(opts.args)
+  end, {
+    nargs = '?',
+    desc = 'Add a comment to a Linear issue (buffer-based editor)',
+  })
+  vim.api.nvim_create_user_command('LinearMiniComment', function(opts)
+    M.add_minicomment(opts.args)
+  end, {
+    nargs = '?',
+    desc = 'Add a comment to a Linear issue (modal input)',
+  })
   vim.api.nvim_create_user_command('LinearAddComment', function(opts)
     M.add_comment(opts.args)
   end, {
     nargs = '?',
-    desc = 'Add a comment to a Linear issue',
+    desc = 'Add a comment to a Linear issue (alias for LinearComment)',
   })
   vim.api.nvim_create_user_command('LinearChangeState', function(opts)
     M.change_state(opts.args)
@@ -1160,6 +1567,12 @@ function M.setup()
   end, {
     nargs = '?',
     desc = 'Take (self-assign) a Linear issue to yourself',
+  })
+  vim.api.nvim_create_user_command('LinearExport', function(opts)
+    M.export_issue(opts.args)
+  end, {
+    nargs = '?',
+    desc = 'Export issue to markdown file',
   })
 end
 
