@@ -107,11 +107,15 @@ linear-cli project-issues <project-id>  # Alias
 
 All commands support `--json` flag for machine-readable output.
 
-## Vim Plugin
+## Editor Plugins
 
-The included `linear.lua` plugin provides integrated Linear workflows inside Neovim.
+Two plugin versions are available:
+- **`linear.lua`** - Full-featured Neovim plugin with async operations
+- **`linear.vim`** - Vim9script port with blocking operations (works in Vim 9+)
 
-### Installation
+Both provide the same commands and features. Choose based on your editor.
+
+### Neovim Installation (linear.lua)
 
 #### Using lazy.nvim
 
@@ -179,13 +183,47 @@ require("linear").setup({
 **Options**:
 - `export_dir` - Directory for `:LinearExport` command (default: `~/.linear/past-tickets`)
 
+### Vim Installation (linear.vim)
+
+For Vim 9+, use the vim9script version:
+
+```vim
+" In your .vimrc
+source ~/hc/linear-cli/linear.vim
+
+" Optional: Add keybindings
+nnoremap <leader>lc :LinearCreate<CR>
+nnoremap <leader>lv :LinearViewIssue<CR>
+nnoremap <leader>lt :LinearTake<CR>
+nnoremap <leader>la :LinearComment<CR>
+nnoremap <leader>lm :LinearMiniComment<CR>
+nnoremap <leader>ls :LinearChangeState<CR>
+nnoremap <leader>le :LinearExport<CR>
+nnoremap <leader>lp :LinearProjectIssues<CR>
+```
+
+Or with vim-plug:
+
+```vim
+Plug '~/hc/linear-cli'
+" Commands auto-register on load
+```
+
+**Note**: The Vim version uses blocking operations (commands pause Vim while running). All features work identically to the Neovim version.
+
 ### Plugin Requirements
 
+**Neovim version (`linear.lua`)**:
 - Neovim 0.7+
 - `linear-cli` binary in `$GOPATH/bin` or local path
 - LINEAR_API_KEY environment variable
 
-The plugin automatically finds the CLI in your GOPATH or falls back to the local build.
+**Vim version (`linear.vim`)**:
+- Vim 9.0+
+- `linear-cli` binary in `$GOPATH/bin` or local path
+- LINEAR_API_KEY environment variable
+
+Both plugins automatically find the CLI in your GOPATH or fall back to the local build.
 
 ## Making Changes
 
@@ -310,7 +348,8 @@ linear-cli/
 ├── main.go                 # Core CLI logic & command handlers
 ├── client.go               # GraphQL HTTP client
 ├── comment_additions.go    # Comment-related operations
-├── linear.lua              # Neovim plugin
+├── linear.lua              # Neovim plugin (async)
+├── linear.vim              # Vim9 plugin (blocking)
 ├── go.mod                  # Go module definition
 ├── claude-docs/            # API reference & docs
 └── tests/                  # Test files
@@ -334,7 +373,9 @@ linear-cli/
 - Comment management
 - Team & member queries
 - JSON output for scripting
-- Neovim integration with editing support
+- Editor integration (Neovim + Vim9) with editing support
+- Parent/child issue relationships
+- Issue export to markdown
 
 **Not Yet Implemented:**
 - Pagination (limited to first 100 results)
@@ -343,5 +384,4 @@ linear-cli/
 - Due date handling
 - Cycle management
 - Bulk operations
-- Markdown export
 
